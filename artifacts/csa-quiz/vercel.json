@@ -1,5 +1,5 @@
 {
-  "outputDirectory": "artifacts/csa-quiz/public",
+  "outputDirectory": "artifacts/csa-quiz/dist",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]
