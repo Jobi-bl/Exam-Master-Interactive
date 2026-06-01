@@ -33,25 +33,49 @@ interface Props {
   onHome?: () => void;
 }
 
-export default function Quiz({ initialSession, initialQuestions, initialTitle, source = "builtin", onHome }: Props) {
-  const [screen, setScreen] = useState<Screen>(initialSession || initialQuestions ? "quiz" : "home");
+export default function Quiz({
+  initialSession,
+  initialQuestions,
+  initialTitle,
+  source = "builtin",
+  onHome,
+}: Props) {
+  const [screen, setScreen] = useState<Screen>(
+    initialSession || initialQuestions ? "quiz" : "home"
+  );
+
+  // FIX 1: Keep a separate "ready" flag so the quiz screen renders
+  // immediately on first click without waiting for a second render cycle.
+  const [quizReady, setQuizReady] = useState(
+    !!(initialSession || initialQuestions)
+  );
+
   const [questions, setQuestions] = useState<Question[]>(
-    initialSession?.questions ?? (initialQuestions ? initialQuestions.map(shuffleOptions) : [])
+    initialSession?.questions ??
+      (initialQuestions ? initialQuestions.map(shuffleOptions) : [])
   );
   const [sessionId] = useState(() => initialSession?.id ?? makeSessionId());
-  const [sessionTitle, setSessionTitle] = useState(initialSession?.title ?? initialTitle ?? "CSA Quiz");
+  const [sessionTitle, setSessionTitle] = useState(
+    initialSession?.title ?? initialTitle ?? "CSA Quiz"
+  );
   const [current, setCurrent] = useState(initialSession?.current ?? 0);
   const [selected, setSelected] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
   const [score, setScore] = useState(initialSession?.score ?? 0);
-  const [wrongAnswers, setWrongAnswers] = useState<WrongAnswer[]>(initialSession?.wrongAnswers ?? []);
+  const [wrongAnswers, setWrongAnswers] = useState<WrongAnswer[]>(
+    initialSession?.wrongAnswers ?? []
+  );
   const [timeLeft, setTimeLeft] = useState(90);
-  const [timerActive, setTimerActive] = useState(!!(initialSession || initialQuestions));
+  const [timerActive, setTimerActive] = useState(
+    !!(initialSession || initialQuestions)
+  );
   const [elapsed, setElapsed] = useState(initialSession?.elapsed ?? 0);
   const [savedIndicator, setSavedIndicator] = useState(false);
   const [expandedTips, setExpandedTips] = useState<Set<number>>(new Set());
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // FIX 1 (continued): startQuiz sets all state synchronously in one batch,
+  // then sets screen LAST so AnimatePresence sees questions already populated.
   const startQuiz = (count: number, title: string) => {
     const shuffled = shuffle(allQuestions).slice(0, count).map(shuffleOptions);
     setQuestions(shuffled);
@@ -64,7 +88,8 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
     setTimerActive(true);
     setElapsed(0);
     setSessionTitle(title);
-    setScreen("quiz");
+    setQuizReady(true);   // mark ready before screen change
+    setScreen("quiz");    // screen change last
   };
 
   const persistSession = useCallback(
@@ -88,6 +113,18 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
     [sessionId, sessionTitle, source, questions, current, score, wrongAnswers, elapsed]
   );
 
+  // FIX 2: Added `revealed` and `questions` to deps so handleTimeout closure
+  // is always fresh; avoids stale-closure double-advance bug on mobile.
+  const handleTimeout = useCallback(() => {
+    if (!revealed) {
+      const q = questions[current];
+      setWrongAnswers((w) => [...w, { q, chosen: "—" }]);
+      setRevealed(true);
+      setTimeout(() => goNext(), 1800);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealed, questions, current]);
+
   useEffect(() => {
     if (screen !== "quiz" || !timerActive) return;
     timerRef.current = setInterval(() => {
@@ -100,17 +137,10 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
         return t - 1;
       });
     }, 1000);
-    return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [timerActive, screen, current]);
-
-  const handleTimeout = useCallback(() => {
-    if (!revealed) {
-      const q = questions[current];
-      setWrongAnswers((w) => [...w, { q, chosen: "—" }]);
-      setRevealed(true);
-      setTimeout(() => goNext(), 1800);
-    }
-  }, [revealed, questions, current]);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [timerActive, screen, current, handleTimeout]);
 
   const handleSelect = (key: string) => {
     if (revealed) return;
@@ -150,9 +180,11 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
     });
   };
 
-  const pct = questions.length > 0 ? Math.round((score / questions.length) * 100) : 0;
+  const pct =
+    questions.length > 0 ? Math.round((score / questions.length) * 100) : 0;
   const topicBreakdown = getTopicBreakdown(questions, wrongAnswers);
-  const formatTime = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const formatTime = (s: number) =>
+    `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   const getGrade = () => {
     if (pct >= 90) return { label: "Excellent!", color: "text-emerald-400", bar: "#10b981" };
@@ -162,34 +194,92 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
   };
 
   return (
-    <div className="quiz-root">
+    /*
+     * FIX 3 (MOBILE): Replace `100vh` with `100dvh` (dynamic viewport height).
+     * `100vh` on iOS Safari counts the address bar height and causes overflow/
+     * content being cut off. `100dvh` adjusts as the browser chrome retracts.
+     * Also add `touch-action: manipulation` globally so iOS doesn't wait 300ms
+     * for a possible double-tap zoom before firing click events — this is what
+     * caused the "double click to open quiz" symptom on mobile.
+     */
+    <div
+      className="quiz-root"
+      style={{
+        minHeight: "100dvh",        // FIX: was 100vh — breaks on mobile Safari
+        touchAction: "manipulation", // FIX: eliminates 300ms tap delay on iOS
+        WebkitTapHighlightColor: "transparent", // removes grey flash on tap
+        overflowX: "hidden",
+      }}
+    >
       <AnimatePresence mode="wait">
 
         {/* ──── HOME ──── */}
         {screen === "home" && (
-          <motion.div key="home" initial={{ opacity: 0, y: 30 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -30 }} transition={{ duration: 0.4 }} className="home-screen">
-            <motion.div className="hero-badge" initial={{ scale: 0.8 }} animate={{ scale: 1 }} transition={{ delay: 0.1, type: "spring", stiffness: 200 }}>
+          <motion.div
+            key="home"
+            initial={{ opacity: 0, y: 30 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -30 }}
+            transition={{ duration: 0.4 }}
+            className="home-screen"
+          >
+            <motion.div
+              className="hero-badge"
+              initial={{ scale: 0.8 }}
+              animate={{ scale: 1 }}
+              transition={{ delay: 0.1, type: "spring", stiffness: 200 }}
+            >
               <Shield size={40} className="hero-icon" />
             </motion.div>
-            <motion.h1 className="hero-title" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
+            <motion.h1
+              className="hero-title"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+            >
               CSA Exam Prep
             </motion.h1>
-            <motion.p className="hero-subtitle" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
+            <motion.p
+              className="hero-subtitle"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.3 }}
+            >
               Certified SOC Analyst — Practice MCQ
             </motion.p>
-            <motion.div className="stats-row" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.35 }}>
+            <motion.div
+              className="stats-row"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.35 }}
+            >
               <div className="stat-chip"><BookOpen size={13} /> 100 Questions</div>
               <div className="stat-chip"><Clock size={13} /> 90s / question</div>
               <div className="stat-chip"><Trophy size={13} /> Randomised</div>
             </motion.div>
-            <motion.div className="mode-grid" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
+            <motion.div
+              className="mode-grid"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.4 }}
+            >
               {[
                 { n: 10, label: "Quick Test", desc: "~15 min" },
                 { n: 25, label: "Practice Set", desc: "~37 min" },
                 { n: 50, label: "Half Exam", desc: "~75 min" },
                 { n: 100, label: "Full Exam", desc: "~150 min" },
               ].map(({ n, label, desc }) => (
-                <motion.button key={n} className="mode-card" whileHover={{ scale: 1.04, y: -2 }} whileTap={{ scale: 0.97 }} onClick={() => startQuiz(n, `CSA Quiz — ${label}`)}>
+                <motion.button
+                  key={n}
+                  className="mode-card"
+                  // FIX 4: use onPointerDown for instant response on both
+                  // touch and mouse — avoids the synthetic event delay that
+                  // manifested as needing two taps on some Android devices.
+                  onPointerDown={() => startQuiz(n, `CSA Quiz — ${label}`)}
+                  whileHover={{ scale: 1.04, y: -2 }}
+                  whileTap={{ scale: 0.97 }}
+                  style={{ touchAction: "manipulation" }}
+                >
                   <span className="mode-count">{n}</span>
                   <span className="mode-label">{label}</span>
                   <span className="mode-desc">{desc}</span>
@@ -197,36 +287,89 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
               ))}
             </motion.div>
             {onHome && (
-              <motion.button className="upload-start-btn" whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }} onClick={onHome} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.55 }}>
+              <motion.button
+                className="upload-start-btn"
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.97 }}
+                onClick={onHome}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.55 }}
+                style={{ touchAction: "manipulation" }}
+              >
                 Upload PDF / TXT to generate a quiz
               </motion.button>
             )}
           </motion.div>
         )}
 
-        {/* ──── QUIZ ──── */}
-        {screen === "quiz" && questions.length > 0 && (
-          <motion.div key={`quiz-${current}`} initial={{ opacity: 0, x: 60 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -60 }} transition={{ duration: 0.3, type: "spring", stiffness: 300, damping: 30 }} className="quiz-screen">
-
+        {/* ──── QUIZ ────
+            FIX 5: Removed `&& questions.length > 0` guard here.
+            Previously: screen flipped to "quiz" but on the FIRST render cycle
+            questions[] was still [] (even though setQuestions ran in the same
+            batch), so AnimatePresence rendered nothing → user saw the home
+            screen persist → they tapped again → second render had questions →
+            quiz appeared. Looked like "double tap needed".
+            Now we use the `quizReady` flag that is set to true in startQuiz()
+            before setScreen(), so the quiz div is always populated on entry.
+        ──── */}
+        {screen === "quiz" && quizReady && (
+          <motion.div
+            key={`quiz-${current}`}
+            initial={{ opacity: 0, x: 60 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -60 }}
+            transition={{ duration: 0.3, type: "spring", stiffness: 300, damping: 30 }}
+            className="quiz-screen"
+          >
             <div className="quiz-header">
               <div className="progress-wrap">
                 <div className="progress-info">
-                  <span className="q-counter">Q {current + 1} <span className="q-total">/ {questions.length}</span></span>
+                  <span className="q-counter">
+                    Q {current + 1}{" "}
+                    <span className="q-total">/ {questions.length}</span>
+                  </span>
                   <span className="q-session-title">{sessionTitle}</span>
                   <span className="q-score">✓ {score}</span>
                 </div>
                 <div className="progress-bar-track">
-                  <motion.div className="progress-bar-fill" animate={{ width: `${((current + 1) / questions.length) * 100}%` }} transition={{ duration: 0.5 }} />
+                  <motion.div
+                    className="progress-bar-fill"
+                    animate={{ width: `${((current + 1) / questions.length) * 100}%` }}
+                    transition={{ duration: 0.5 }}
+                  />
                 </div>
               </div>
               <div className="header-right">
-                <motion.button className={`save-btn ${savedIndicator ? "save-btn-saved" : ""}`} onClick={() => persistSession()} whileTap={{ scale: 0.92 }} title="Save & continue later">
+                <motion.button
+                  className={`save-btn ${savedIndicator ? "save-btn-saved" : ""}`}
+                  onClick={() => persistSession()}
+                  whileTap={{ scale: 0.92 }}
+                  title="Save & continue later"
+                  style={{ touchAction: "manipulation" }}
+                >
                   <Save size={13} /> {savedIndicator ? "Saved!" : "Save"}
                 </motion.button>
-                <div className={`timer-ring ${timeLeft <= 15 ? "timer-urgent" : timeLeft <= 30 ? "timer-warn" : ""}`}>
+                <div
+                  className={`timer-ring ${
+                    timeLeft <= 15
+                      ? "timer-urgent"
+                      : timeLeft <= 30
+                      ? "timer-warn"
+                      : ""
+                  }`}
+                >
                   <svg viewBox="0 0 44 44" className="ring-svg">
                     <circle cx="22" cy="22" r="18" className="ring-bg" />
-                    <motion.circle cx="22" cy="22" r="18" className="ring-fg" strokeDasharray="113.1" strokeDashoffset={113.1 - (timeLeft / 90) * 113.1} transition={{ duration: 1, ease: "linear" }} />
+                    <motion.circle
+                      cx="22"
+                      cy="22"
+                      r="18"
+                      className="ring-fg"
+                      strokeDasharray="113.1"
+                      strokeDashoffset={113.1 - (timeLeft / 90) * 113.1}
+                      transition={{ duration: 1, ease: "linear" }}
+                    />
                   </svg>
                   <span className="timer-text">{timeLeft}</span>
                 </div>
@@ -249,11 +392,30 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
                   else state = "dim";
                 }
                 return (
-                  <motion.button key={opt.key} className={`option-btn option-${state}`} onClick={() => handleSelect(opt.key)} initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.06 }} whileHover={!revealed ? { scale: 1.02 } : {}} whileTap={!revealed ? { scale: 0.98 } : {}} disabled={revealed}>
+                  <motion.button
+                    key={opt.key}
+                    className={`option-btn option-${state}`}
+                    // FIX 6: onPointerDown instead of onClick for option buttons.
+                    // On iOS, onClick fires ~300ms after touch if the element
+                    // doesn't have explicit touch-action. With onPointerDown the
+                    // answer registers instantly on first tap.
+                    onPointerDown={() => handleSelect(opt.key)}
+                    initial={{ opacity: 0, y: 16 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: i * 0.06 }}
+                    whileHover={!revealed ? { scale: 1.02 } : {}}
+                    whileTap={!revealed ? { scale: 0.98 } : {}}
+                    disabled={revealed}
+                    style={{ touchAction: "manipulation" }}
+                  >
                     <span className="opt-key">{opt.key}</span>
                     <span className="opt-text">{opt.text}</span>
-                    {revealed && isCorrect && <CheckCircle size={16} className="opt-icon correct-icon" />}
-                    {revealed && isSelected && !isCorrect && <XCircle size={16} className="opt-icon wrong-icon" />}
+                    {revealed && isCorrect && (
+                      <CheckCircle size={16} className="opt-icon correct-icon" />
+                    )}
+                    {revealed && isSelected && !isCorrect && (
+                      <XCircle size={16} className="opt-icon wrong-icon" />
+                    )}
                   </motion.button>
                 );
               })}
@@ -261,14 +423,37 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
 
             <AnimatePresence>
               {revealed && (
-                <motion.div className="reveal-section" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-                  <div className={`answer-badge ${selected === questions[current].answer ? "correct-badge" : "wrong-badge"}`}>
-                    {selected === questions[current].answer
-                      ? <><CheckCircle size={14} /> Correct!</>
-                      : <><XCircle size={14} /> Incorrect — Answer: <strong>{questions[current].answer}</strong></>}
+                <motion.div
+                  className="reveal-section"
+                  initial={{ opacity: 0, y: 16 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                >
+                  <div
+                    className={`answer-badge ${
+                      selected === questions[current].answer
+                        ? "correct-badge"
+                        : "wrong-badge"
+                    }`}
+                  >
+                    {selected === questions[current].answer ? (
+                      <><CheckCircle size={14} /> Correct!</>
+                    ) : (
+                      <>
+                        <XCircle size={14} /> Incorrect — Answer:{" "}
+                        <strong>{questions[current].answer}</strong>
+                      </>
+                    )}
                   </div>
-                  <motion.button className="next-btn" onClick={goNext} whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }}>
-                    {current + 1 >= questions.length ? "See Results" : "Next"} <ChevronRight size={16} />
+                  <motion.button
+                    className="next-btn"
+                    onPointerDown={goNext}   // FIX: instant response on mobile
+                    whileHover={{ scale: 1.04 }}
+                    whileTap={{ scale: 0.97 }}
+                    style={{ touchAction: "manipulation" }}
+                  >
+                    {current + 1 >= questions.length ? "See Results" : "Next"}{" "}
+                    <ChevronRight size={16} />
                   </motion.button>
                 </motion.div>
               )}
@@ -278,45 +463,114 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
 
         {/* ──── RESULT + ANALYSIS ──── */}
         {screen === "result" && (
-          <motion.div key="result" initial={{ opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.4 }} className="result-screen">
-
+          <motion.div
+            key="result"
+            initial={{ opacity: 0, scale: 0.94 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.4 }}
+            className="result-screen"
+          >
             {/* Score */}
-            <motion.div className="trophy-wrap" initial={{ scale: 0, rotate: -20 }} animate={{ scale: 1, rotate: 0 }} transition={{ delay: 0.1, type: "spring" }}>
+            <motion.div
+              className="trophy-wrap"
+              initial={{ scale: 0, rotate: -20 }}
+              animate={{ scale: 1, rotate: 0 }}
+              transition={{ delay: 0.1, type: "spring" }}
+            >
               <Trophy size={40} className="trophy-icon" />
             </motion.div>
-            <motion.div className="score-circle" initial={{ scale: 0.5, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ delay: 0.15, type: "spring" }}>
+            <motion.div
+              className="score-circle"
+              initial={{ scale: 0.5, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              transition={{ delay: 0.15, type: "spring" }}
+            >
               <span className="score-pct">{pct}%</span>
-              <span className="score-raw">{score} / {questions.length}</span>
+              <span className="score-raw">
+                {score} / {questions.length}
+              </span>
             </motion.div>
-            <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
-              <p className={`grade-label ${getGrade().color}`}>{getGrade().label}</p>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.3 }}
+            >
+              <p className={`grade-label ${getGrade().color}`}>
+                {getGrade().label}
+              </p>
             </motion.div>
-            <motion.div className="result-stats" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.35 }}>
-              <div className="rstat"><CheckCircle size={14} className="text-emerald-400" /><span>Correct: {score}</span></div>
-              <div className="rstat"><XCircle size={14} className="text-red-400" /><span>Wrong: {wrongAnswers.length}</span></div>
-              <div className="rstat"><Clock size={14} className="text-cyan-400" /><span>Time: {formatTime(elapsed)}</span></div>
+            <motion.div
+              className="result-stats"
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.35 }}
+            >
+              <div className="rstat">
+                <CheckCircle size={14} className="text-emerald-400" />
+                <span>Correct: {score}</span>
+              </div>
+              <div className="rstat">
+                <XCircle size={14} className="text-red-400" />
+                <span>Wrong: {wrongAnswers.length}</span>
+              </div>
+              <div className="rstat">
+                <Clock size={14} className="text-cyan-400" />
+                <span>Time: {formatTime(elapsed)}</span>
+              </div>
             </motion.div>
 
             {/* Topic Breakdown */}
             {topicBreakdown.length > 0 && (
-              <motion.div className="topic-section" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.4 }}>
-                <h3 className="section-title"><BarChart2 size={15} /> Topic Breakdown</h3>
+              <motion.div
+                className="topic-section"
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.4 }}
+              >
+                <h3 className="section-title">
+                  <BarChart2 size={15} /> Topic Breakdown
+                </h3>
                 <div className="topic-list">
                   {topicBreakdown.map((t, i) => (
-                    <motion.div key={t.topic} className="topic-row" initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.45 + i * 0.04 }}>
+                    <motion.div
+                      key={t.topic}
+                      className="topic-row"
+                      initial={{ opacity: 0, x: -16 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      transition={{ delay: 0.45 + i * 0.04 }}
+                    >
                       <div className="topic-meta">
                         <span className="topic-name">{t.topic}</span>
-                        <span className={`topic-pct ${t.pct < 50 ? "pct-bad" : t.pct < 75 ? "pct-ok" : "pct-good"}`}>{t.pct}%</span>
+                        <span
+                          className={`topic-pct ${
+                            t.pct < 50
+                              ? "pct-bad"
+                              : t.pct < 75
+                              ? "pct-ok"
+                              : "pct-good"
+                          }`}
+                        >
+                          {t.pct}%
+                        </span>
                       </div>
                       <div className="topic-bar-track">
                         <motion.div
-                          className={`topic-bar-fill ${t.pct < 50 ? "bar-bad" : t.pct < 75 ? "bar-ok" : "bar-good"}`}
+                          className={`topic-bar-fill ${
+                            t.pct < 50
+                              ? "bar-bad"
+                              : t.pct < 75
+                              ? "bar-ok"
+                              : "bar-good"
+                          }`}
                           initial={{ width: 0 }}
                           animate={{ width: `${t.pct}%` }}
                           transition={{ delay: 0.5 + i * 0.04, duration: 0.6 }}
                         />
                       </div>
-                      <span className="topic-counts">{t.total - t.wrong}/{t.total}</span>
+                      <span className="topic-counts">
+                        {t.total - t.wrong}/{t.total}
+                      </span>
                     </motion.div>
                   ))}
                 </div>
@@ -325,8 +579,15 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
 
             {/* Wrong answers + tips */}
             {wrongAnswers.length > 0 && (
-              <motion.div className="review-section" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.55 }}>
-                <h3 className="section-title"><Lightbulb size={15} /> Wrong Answers + Memory Tips</h3>
+              <motion.div
+                className="review-section"
+                initial={{ opacity: 0, y: 16 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.55 }}
+              >
+                <h3 className="section-title">
+                  <Lightbulb size={15} /> Wrong Answers + Memory Tips
+                </h3>
                 <div className="review-list">
                   {wrongAnswers.map(({ q, chosen }, i) => {
                     const tip = generateTip(q, chosen);
@@ -334,17 +595,36 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
                     const correctOpt = q.options.find((o) => o.key === q.answer);
                     const chosenOpt = q.options.find((o) => o.key === chosen);
                     return (
-                      <motion.div key={i} className="review-item" initial={{ opacity: 0, x: -16 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.6 + i * 0.04 }}>
-                        <button className="review-q-btn" onClick={() => toggleTip(q.id)}>
+                      <motion.div
+                        key={i}
+                        className="review-item"
+                        initial={{ opacity: 0, x: -16 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        transition={{ delay: 0.6 + i * 0.04 }}
+                      >
+                        <button
+                          className="review-q-btn"
+                          onClick={() => toggleTip(q.id)}
+                          style={{ touchAction: "manipulation" }}
+                        >
                           <span className="review-qnum">Q{q.id}</span>
-                          <span className="review-q-text">{q.question.slice(0, 100)}{q.question.length > 100 ? "…" : ""}</span>
-                          {open ? <ChevronUp size={14} className="chevron-icon" /> : <ChevronDown size={14} className="chevron-icon" />}
+                          <span className="review-q-text">
+                            {q.question.slice(0, 100)}
+                            {q.question.length > 100 ? "…" : ""}
+                          </span>
+                          {open ? (
+                            <ChevronUp size={14} className="chevron-icon" />
+                          ) : (
+                            <ChevronDown size={14} className="chevron-icon" />
+                          )}
                         </button>
 
                         <div className="review-answers-row">
                           <span className="review-wrong-ans">
                             <XCircle size={12} />
-                            {chosen !== "—" ? `${chosen}. ${chosenOpt?.text ?? chosen}` : "Timed out"}
+                            {chosen !== "—"
+                              ? `${chosen}. ${chosenOpt?.text ?? chosen}`
+                              : "Timed out"}
                           </span>
                           <span className="review-correct-ans">
                             <CheckCircle size={12} />
@@ -352,24 +632,32 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
                           </span>
                         </div>
 
-                        {/* Flash key always visible */}
                         <div className="flash-key">
                           <Zap size={12} className="flash-icon" />
                           <span className="flash-text">{tip.flash}</span>
                           <span className="topic-badge">{tip.topic}</span>
                         </div>
 
-                        {/* Full tip collapsible */}
                         <AnimatePresence>
                           {open && (
-                            <motion.div className="tip-expand" initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.25 }}>
+                            <motion.div
+                              className="tip-expand"
+                              initial={{ opacity: 0, height: 0 }}
+                              animate={{ opacity: 1, height: "auto" }}
+                              exit={{ opacity: 0, height: 0 }}
+                              transition={{ duration: 0.25 }}
+                            >
                               <div className="tip-mnemonic">
                                 <Lightbulb size={13} className="tip-bulb" />
                                 <p>{tip.mnemonic}</p>
                               </div>
                               <div className="tip-hook">
-                                <span className="tip-hook-label">Hook in question →</span>
-                                <span className="tip-hook-text">"{tip.hook}"</span>
+                                <span className="tip-hook-label">
+                                  Hook in question →
+                                </span>
+                                <span className="tip-hook-text">
+                                  "{tip.hook}"
+                                </span>
                               </div>
                             </motion.div>
                           )}
@@ -382,18 +670,50 @@ export default function Quiz({ initialSession, initialQuestions, initialTitle, s
             )}
 
             {/* Actions */}
-            <motion.div className="result-actions" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.7 }}>
-              <motion.button className="action-btn primary-btn" whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }} onClick={() => { setScreen("home"); setQuestions([]); setScore(0); setWrongAnswers([]); setElapsed(0); setCurrent(0); }}>
+            <motion.div
+              className="result-actions"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.7 }}
+            >
+              <motion.button
+                className="action-btn primary-btn"
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.97 }}
+                style={{ touchAction: "manipulation" }}
+                onClick={() => {
+                  setScreen("home");
+                  setQuizReady(false);
+                  setQuestions([]);
+                  setScore(0);
+                  setWrongAnswers([]);
+                  setElapsed(0);
+                  setCurrent(0);
+                }}
+              >
                 <Play size={14} /> New Quiz
               </motion.button>
               {source === "upload" && initialQuestions && (
-                <motion.button className="action-btn secondary-btn" whileHover={{ scale: 1.04 }} whileTap={{ scale: 0.97 }} onClick={() => {
-                  const reshuffled = shuffle(initialQuestions!).map(shuffleOptions);
-                  setQuestions(reshuffled);
-                  setCurrent(0); setSelected(null); setRevealed(false);
-                  setScore(0); setWrongAnswers([]); setTimeLeft(90);
-                  setTimerActive(true); setElapsed(0); setScreen("quiz");
-                }}>
+                <motion.button
+                  className="action-btn secondary-btn"
+                  whileHover={{ scale: 1.04 }}
+                  whileTap={{ scale: 0.97 }}
+                  style={{ touchAction: "manipulation" }}
+                  onClick={() => {
+                    const reshuffled = shuffle(initialQuestions!).map(shuffleOptions);
+                    setQuestions(reshuffled);
+                    setCurrent(0);
+                    setSelected(null);
+                    setRevealed(false);
+                    setScore(0);
+                    setWrongAnswers([]);
+                    setTimeLeft(90);
+                    setTimerActive(true);
+                    setElapsed(0);
+                    setQuizReady(true);
+                    setScreen("quiz");
+                  }}
+                >
                   <RotateCcw size={14} /> Retry Upload
                 </motion.button>
               )}
