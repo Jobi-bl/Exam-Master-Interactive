@@ -1,0 +1,31 @@
+kind = "web"
+previewPath = "/"
+title = "CSA MCQ Quiz"
+version = "1.0.0"
+id = "artifacts/csa-quiz"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 22145
+
+[services.development]
+run = "pnpm --filter @workspace/csa-quiz run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/csa-quiz", "run", "build" ]
+publicDir = "artifacts/csa-quiz/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "22145"
+BASE_PATH = "/"
